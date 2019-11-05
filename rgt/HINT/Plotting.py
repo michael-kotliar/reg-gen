@@ -1,19 +1,21 @@
 import os
 import numpy as np
-from pysam import Samfile, Fastafile
+import pysam
 from Bio import motifs
 from scipy.signal import savgol_filter
 from scipy.stats import scoreatpercentile
 from argparse import SUPPRESS
+import time
 import logomaker
 import matplotlib.pyplot as plt
-import pyx
+from multiprocessing import Pool, cpu_count
 
 # Internal
-from rgt.Util import GenomeData, AuxiliaryFunctions
+from rgt.Util import GenomeData, AuxiliaryFunctions, ErrorHandler
 from rgt.HINT.GenomicSignal import GenomicSignal
 from rgt.GenomicRegionSet import GenomicRegionSet
 from rgt.HINT.biasTable import BiasTable
+from rgt.HINT.Util import get_pwm
 
 
 def plotting_args(parser):
@@ -22,15 +24,10 @@ def plotting_args(parser):
                         help=("Organism considered on the analysis. Check our full documentation for all available "
                               "options. All default files such as genomes will be based on the chosen organism "
                               "and the data.config file."))
-    parser.add_argument("--reads-file", type=str, metavar="FILE", default=None)
-    parser.add_argument("--region-file", type=str, metavar="FILE", default=None)
-    parser.add_argument("--reads-file1", type=str, metavar="FILE", default=None)
-    parser.add_argument("--reads-file2", type=str, metavar="FILE", default=None)
-    parser.add_argument("--motif-file", type=str, metavar="FILE", default=None)
     parser.add_argument("--bias-table", type=str, metavar="FILE1_F,FILE1_R", default=None)
-    parser.add_argument("--bias-table1", type=str, metavar="FILE1_F,FILE1_R", default=None)
-    parser.add_argument("--bias-table2", type=str, metavar="FILE1_F,FILE1_R", default=None)
     parser.add_argument("--window-size", type=int, metavar="INT", default=400)
+    parser.add_argument("--nc", type=int, metavar="INT", default=1,
+                        help="The number of cores. DEFAULT: 1")
 
     # Hidden Options
     parser.add_argument("--initial-clip", type=int, metavar="INT", default=50, help=SUPPRESS)
@@ -48,7 +45,7 @@ def plotting_args(parser):
                         help="The prefix for results files.")
 
     # plot type
-    parser.add_argument("--seq-logo", default=False, action='store_true')
+    parser.add_argument("--raw", default=False, action='store_true')
     parser.add_argument("--bias-raw-bc-line", default=False, action='store_true')
     parser.add_argument("--raw-bc-line", default=False, action='store_true')
     parser.add_argument("--strand-line", default=False, action='store_true')
@@ -59,10 +56,13 @@ def plotting_args(parser):
     parser.add_argument("--fragment-raw-size-line", default=False, action='store_true')
     parser.add_argument("--fragment-bc-size-line", default=False, action='store_true')
 
+    parser.add_argument('input_files', metavar='reads.bam regions.bed', type=str, nargs='*',
+                        help='BAM file of reads and BED files of interesting regions')
+
 
 def plotting_run(args):
-    if args.seq_logo:
-        seq_logo(args)
+    if args.raw:
+        line_raw_signal(args=args)
 
     if args.bias_raw_bc_line:
         bias_raw_bc_strand_line(args)
@@ -86,89 +86,91 @@ def plotting_run(args):
         fragment_size_bc_line(args)
 
 
-def seq_logo(args):
-    logo_fname = os.path.join(args.output_location, "{}.logo.eps".format(args.output_prefix))
-    pwm_file = os.path.join(args.output_location, "{}.pwm".format(args.output_prefix))
-    pwm_dict = dict(
-        [("A", [0.0] * args.window_size), ("C", [0.0] * args.window_size), ("G", [0.0] * args.window_size),
-         ("T", [0.0] * args.window_size), ("N", [0.0] * args.window_size)])
+def get_raw_signal(arguments):
+    (bam_file, regions, organism, window_size, forward_shift, reverse_shift) = arguments
 
-    genome_data = GenomeData(args.organism)
-    fasta_file = Fastafile(genome_data.get_genome())
-    bam = Samfile(args.reads_file, "rb")
-    regions = GenomicRegionSet("Peaks")
-    regions.read(args.region_file)
+    genomic_signal = GenomicSignal(bam_file)
 
+    signal = np.zeros(window_size)
     for region in regions:
-        for read in bam.fetch(region.chrom, region.initial, region.final):
-            # check if the read is unmapped, according to issue #112
-            if read.is_unmapped:
-                continue
+        mid = (region.final + region.initial) / 2
+        p1 = mid - window_size / 2
+        p2 = mid + window_size / 2
+        if p1 <= 0:
+            continue
 
-            if not read.is_reverse:
-                cut_site = read.reference_start
-                p1 = cut_site - int(args.window_size / 2)
-            else:
-                cut_site = read.reference_end - 1
-                p1 = cut_site - int(args.window_size / 2)
+        signal += genomic_signal.get_raw_signal(chromosome=region.chrom,
+                                                start=p1,
+                                                end=p2,
+                                                forward_shift=forward_shift,
+                                                reverse_shift=reverse_shift,
+                                                strand_specific=False)
 
-            p2 = p1 + args.window_size
+    signal /= len(regions)
+    return signal
 
-            # Fetching k-mer
-            curr_seq = str(fasta_file.fetch(region.chrom, p1, p2)).upper()
-            if read.is_reverse: continue
-            for i in range(0, len(curr_seq)):
-                pwm_dict[curr_seq[i]][i] += 1
 
-    with open(pwm_file, "w") as f:
-        for e in ["A", "C", "G", "T"]:
-            f.write(" ".join([str(int(c)) for c in pwm_dict[e]]) + "\n")
+def line_raw_signal(args):
+    # Initializing Error Handler
+    err = ErrorHandler()
 
-    pwm = motifs.read(open(pwm_file), "pfm")
-    pwm.weblogo(logo_fname, format="eps", stack_width="large", stacks_per_line=str(args.window_size),
-                color_scheme="color_classic", unit_name="", show_errorbars=False, logo_title="",
-                show_xaxis=False, xaxis_label="", show_yaxis=False, yaxis_label="",
-                show_fineprint=False, show_ends=False, yaxis_scale=args.y_lim)
+    if len(args.input_files) != 2:
+        err.throw_error("ME_FEW_ARG", add_msg="You must specify reads and regions file.")
 
-    start = -(args.window_size / 2)
-    end = (args.window_size / 2) - 1
-    x = np.linspace(start, end, num=args.window_size).tolist()
+    bam_file, region_file = args.input_files[0], args.input_files[1]
+    # check if index exists for bam file
+    bam_index_file = "{}.bai".format(bam_file)
+    if not os.path.exists(bam_index_file):
+        pysam.index(bam_file)
 
-    fig = plt.figure(figsize=(8, 2))
-    ax = fig.add_subplot(111)
+    regions = GenomicRegionSet("Interested regions")
+    regions.read(region_file)
 
-    ax.xaxis.set_ticks_position('bottom')
-    ax.yaxis.set_ticks_position('left')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_position(('outward', 15))
-    ax.tick_params(direction='out')
+    regions.sort()
+    regions.remove_duplicates()
+    region_name_list = list(set(regions.get_names()))
 
-    ax.xaxis.set_ticks(list(map(int, x)))
-    x1 = list(map(int, x))
-    ax.set_xticklabels(list(map(str, x1)), rotation=90)
-    ax.set_xlabel("Coordinates from Read Start", fontweight='bold')
+    region_len = list()
+    region_num = list()
+    region_pwm = list()
 
-    ax.set_ylim([0, args.y_lim])
-    ax.yaxis.set_ticks([0, args.y_lim])
-    ax.set_yticklabels([str(0), str(args.y_lim)], rotation=90)
-    ax.set_ylabel("bits", rotation=90)
+    print("{}: preparing data for plotting...\n".format(time.strftime("%D-%H:%M:%S")))
+    mpbs_regions_by_name = dict()
+    for region in regions:
+        if region.name not in mpbs_regions_by_name:
+            mpbs_regions_by_name[region.name] = GenomicRegionSet(region.name)
+        mpbs_regions_by_name[region.name].add(region)
 
-    figure_name = os.path.join(args.output_location, "{}.line.eps".format(args.output_prefix))
-    fig.tight_layout()
-    fig.savefig(figure_name, format="eps", dpi=300)
+    for mpbs_name in region_name_list:
+        region_len.append(mpbs_regions_by_name[mpbs_name][0].final - mpbs_regions_by_name[mpbs_name][0].initial)
+        region_num.append(len(mpbs_regions_by_name[mpbs_name]))
 
-    # Creating canvas and printing eps / pdf with merged results
-    output_fname = os.path.join(args.output_location, "{}.eps".format(args.output_prefix))
-    c = pyx.canvas.canvas()
-    c.insert(pyx.epsfile.epsfile(0, 0, figure_name, scale=1.0))
-    c.insert(pyx.epsfile.epsfile(1.5, 1.5, logo_fname, width=18.8, height=3.5))
-    c.writeEPSfile(output_fname)
-    os.system("epstopdf " + output_fname)
+    print("{}: generating pwm for each factor...\n".format(time.strftime("%D-%H:%M:%S")))
+    if args.nc == 1:
+        for region_name in region_name_list:
+            pwm = get_pwm([args.organism, mpbs_regions_by_name[region_name], args.window_size])
+            region_pwm.append(pwm)
+    else:
+        with Pool(processes=args.nc) as pool:
+            arguments_list = list()
+            for mpbs_name in region_name_list:
+                arguments_list.append([args.organism, mpbs_regions_by_name[mpbs_name], args.window_size])
 
-    os.remove(os.path.join(args.output_location, "{}.line.eps".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.logo.eps".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.eps".format(args.output_prefix)))
+            pwm_list = pool.map(get_pwm, arguments_list)
+            for i, mpbs_name in enumerate(region_name_list):
+                region_pwm.append(pwm_list[i])
+
+    print("{}: generating signal for each factor...\n".format(time.strftime("%D-%H:%M:%S"),
+                                                              len(regions)))
+
+    signals = np.zeros(len(region_name_list), args.window_size, dtype=np.float32)
+    if args.nc == 1:
+        for i, region_name in enumerate(region_name_list):
+            regions = mpbs_regions_by_name[region_name]
+            arguments = (bam_file, regions, args.organism, args.window_size, args.forward_shift,
+                         args.reverse_shift)
+
+            signals[i] = get_raw_signal(arguments)
 
 
 def bias_raw_bc_line(args):

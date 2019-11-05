@@ -77,7 +77,7 @@ def get_raw_tracks(args):
     regions = GenomicRegionSet("Interested regions")
     regions.read(region_file)
     regions.merge()
-    genomic_signal = GenomicSignal(args.input_files[0])
+    genomic_signal = GenomicSignal(bam_file)
 
     print("{}: generating signal for {} regions...\n".format(time.strftime("%D-%H:%M:%S"),
                                                              len(regions)))
