@@ -127,25 +127,25 @@ class GenomicSignal:
             non_zero_signal_mean = raw_signal[i:i + norm_window].sum() / np.count_nonzero(raw_signal[i:i + norm_window])
             norm_signal[i] = raw_signal[i + int(norm_window / 2)] / non_zero_signal_mean
 
-        perc = scoreatpercentile(norm_signal, per_norm)
-        std = norm_signal.std()
-        if std == 0:
-            return norm_signal
-        else:
-            norm_signal =
-
-        norm_signal = self.hon_norm_atac(norm_signal, perc, std)
-
-        if std != 0:
-            norm_seq = []
-            for e in sequence:
-                if e == 0:
-                    norm_seq.append(e)
-                else:
-                    norm_seq.append(1.0 / (1.0 + (exp(-(e - mean) / std))))
-            return norm_seq
-        else:
-            return sequence
+        # perc = scoreatpercentile(norm_signal, per_norm)
+        # std = norm_signal.std()
+        # if std == 0:
+        #     return norm_signal
+        # else:
+        #     norm_signal =
+        #
+        # norm_signal = self.hon_norm_atac(norm_signal, perc, std)
+        #
+        # if std != 0:
+        #     norm_seq = []
+        #     for e in sequence:
+        #         if e == 0:
+        #             norm_seq.append(e)
+        #         else:
+        #             norm_seq.append(1.0 / (1.0 + (exp(-(e - mean) / std))))
+        #     return norm_seq
+        # else:
+        #     return sequence
 
         return norm_signal
 
