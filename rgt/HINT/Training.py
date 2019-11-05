@@ -7,7 +7,7 @@ from argparse import SUPPRESS
 
 # Internal
 from rgt.Util import GenomeData
-from rgt.HINT.signalProcessing import GenomicSignal
+from rgt.HINT.GenomicSignal import GenomicSignal
 from rgt.HINT.hmm import HMM, SemiSupervisedGaussianHMM
 from rgt.HINT.biasTable import BiasTable
 

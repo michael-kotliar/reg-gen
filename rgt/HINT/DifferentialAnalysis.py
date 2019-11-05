@@ -1,13 +1,12 @@
-
 import os
 import numpy as np
 import pandas as pd
 import pysam
+import time
 
 import logomaker
 from pysam import Samfile, Fastafile
 from math import ceil, floor
-import logging
 
 from scipy.stats import zscore
 from scipy.stats import norm
@@ -75,11 +74,10 @@ def diff_analysis_run(args):
     err = ErrorHandler()
 
     output_location = os.path.join(args.output_location, "Lineplots")
-    try:
-        if not os.path.isdir(output_location):
-            os.makedirs(output_location)
-    except Exception:
-        err.throw_error("MM_OUT_FOLDER_CREATION")
+    if not os.path.isdir(output_location):
+        os.makedirs(output_location)
+
+    print("{} cpus are detected and {} of them will be used...\n".format(cpu_count(), args.nc))
 
     # check if they have same length
     mpbs_files = args.mpbs_files.strip().split(",")
@@ -96,8 +94,8 @@ def diff_analysis_run(args):
                   "#993300", "#00FFFF", "#99FF33", "#FF6666", "#CC99FF", "#FF99FF", "#CCCCCC", "#FFFF00"]
 
     assert len(mpbs_files) == len(reads_files) == len(conditions), \
-        "Number of motif, read and condition names are not same: {}, {}, {}".format(len(mpbs_files), len(reads_files),
-                                                                                    len(conditions))
+        "Number of motif matching files, bam files and condition names are not same: {}, {}, {}".format(
+            len(mpbs_files), len(reads_files), len(conditions))
 
     # Check if the index file exists
     for reads_file in reads_files:
@@ -105,6 +103,7 @@ def diff_analysis_run(args):
         if not os.path.exists(base_name):
             pysam.index(reads_file)
 
+    print("{}: loading motif matching files...\n".format(time.strftime("%D-%H:%M:%S")))
     mpbs = GenomicRegionSet("Motif Predicted Binding Sites of All Conditions")
     for i, mpbs_file in enumerate(mpbs_files):
         mpbs.read(mpbs_file)
@@ -113,19 +112,42 @@ def diff_analysis_run(args):
     mpbs.remove_duplicates()
     mpbs_name_list = list(set(mpbs.get_names()))
 
-    signals = np.zeros(shape=(len(conditions), len(mpbs_name_list), args.window_size), dtype=np.float32)
     motif_len = list()
     motif_num = list()
     motif_pwm = list()
 
-    print((" {} cpus are detected and {} of them will be used...\n".format(cpu_count(), args.nc)))
+    print("{}: preparing data for differential footprinting analysis...\n".format(time.strftime("%D-%H:%M:%S")))
+    mpbs_regions_by_name = dict()
+    for region in mpbs:
+        if region.name not in mpbs_regions_by_name:
+            mpbs_regions_by_name[region.name] = GenomicRegionSet(region.name)
+        mpbs_regions_by_name[region.name].add(region)
 
-    genome_data = GenomeData(args.organism)
-    fasta = Fastafile(genome_data.get_genome())
+    del mpbs
 
-    print("generating signal for each motif and condition...\n")
+    for mpbs_name in mpbs_name_list:
+        motif_len.append(mpbs_regions_by_name[mpbs_name][0].final - mpbs_regions_by_name[mpbs_name][0].initial)
+        motif_num.append(len(mpbs_regions_by_name[mpbs_name]))
+
+    print("{}: generating pwm for each factor...\n".format(time.strftime("%D-%H:%M:%S")))
+    if args.nc == 1:
+        for mpbs_name in mpbs_name_list:
+            pwm = get_pwm([args.organism, mpbs_regions_by_name[mpbs_name], args.window_size])
+            motif_pwm.append(pwm)
+    else:
+        with Pool(processes=args.nc) as pool:
+            arguments_list = list()
+            for mpbs_name in mpbs_name_list:
+                arguments_list.append([args.organism, mpbs_regions_by_name[mpbs_name], args.window_size])
+
+            pwm_list = pool.map(get_pwm, arguments_list)
+            for i, mpbs_name in enumerate(mpbs_name_list):
+                motif_pwm.append(pwm_list[i])
+
+    signals = np.zeros(shape=(len(conditions), len(mpbs_name_list), args.window_size), dtype=np.float32)
     # differential analysis using bias corrected signal
     if args.bc:
+        print("{}: loading bias table for bias correction...\n".format(time.strftime("%D-%H:%M:%S")))
         hmm_data = HmmData()
         table_forward = hmm_data.get_default_bias_table_F_ATAC()
         table_reverse = hmm_data.get_default_bias_table_R_ATAC()
@@ -134,91 +156,62 @@ def diff_analysis_run(args):
         # do not use multi-processing
         if args.nc == 1:
             for i, condition in enumerate(conditions):
+                print("{}: generating signal for condition {} ...\n".format(time.strftime("%D-%H:%M:%S"),
+                                                                            condition))
                 for j, mpbs_name in enumerate(mpbs_name_list):
-                    mpbs_regions = mpbs.by_names([mpbs_name])
+                    mpbs_regions = mpbs_regions_by_name[mpbs_name]
                     arguments = (mpbs_regions, reads_files[i], args.organism, args.window_size, args.forward_shift,
                                  args.reverse_shift, bias_table)
-                    try:
-                        signals[i, j, :] = get_bc_signal(arguments)
-                    except Exception:
-                        logging.exception("get bias corrected signal failed")
 
-                    # get motif length, number and pwm matrix
-                    motif_len.append(mpbs_regions[0].final - mpbs_regions[0].initial)
-                    motif_num.append(len(mpbs_regions))
-                    motif_pwm.append(get_pwm(fasta, mpbs_regions, args.window_size))
+                    signals[i, j, :] = get_bc_signal(arguments)
 
         # use multi-processing
         else:
-            pool = Pool(processes=args.nc)
             for i, condition in enumerate(conditions):
-                print(("generating signal for condition {} \n".format(condition)))
-                arguments_list = list()
-                for mpbs_name in mpbs_name_list:
-                    mpbs_regions = mpbs.by_names([mpbs_name])
-                    arguments = (mpbs_regions, reads_files[i], args.organism, args.window_size, args.forward_shift,
-                                 args.reverse_shift, bias_table)
-                    arguments_list.append(arguments)
+                print("{}: generating signal for condition {} ...\n".format(time.strftime("%D-%H:%M:%S"),
+                                                                            condition))
+                with Pool(processes=args.nc) as pool:
+                    arguments_list = list()
+                    for mpbs_name in mpbs_name_list:
+                        mpbs_regions = mpbs_regions_by_name[mpbs_name]
+                        arguments = (mpbs_regions, reads_files[i], args.organism, args.window_size, args.forward_shift,
+                                     args.reverse_shift, bias_table)
+                        arguments_list.append(arguments)
 
-                    # get motif length, number and pwm matrix
-                    motif_len.append(mpbs_regions[0].final - mpbs_regions[0].initial)
-                    motif_num.append(len(mpbs_regions))
-                    motif_pwm.append(get_pwm(fasta, mpbs_regions, args.window_size))
-
-                try:
-                    res = pool.map_async(get_bc_signal, arguments_list)
+                    res = pool.map(get_bc_signal, arguments_list)
                     signals[i] = np.array(res)
-                    pool.close()
-                    pool.join()
-                    del pool
-                except Exception:
-                    logging.exception("get bias corrected signal failed")
 
     # differential analysis using raw signal
     else:
         # do not use multi-processing
         if args.nc == 1:
             for i, condition in enumerate(conditions):
+                print("{}: generating signal for condition {} ...\n".format(time.strftime("%D-%H:%M:%S"),
+                                                                            condition))
                 for j, mpbs_name in enumerate(mpbs_name_list):
-                    mpbs_regions = mpbs.by_names([mpbs_name])
+                    mpbs_regions = mpbs_regions_by_name[mpbs_name]
                     arguments = (mpbs_regions, reads_files[i], args.organism, args.window_size, args.forward_shift,
                                  args.reverse_shift)
-                    try:
-                        signals[i, j, :] = get_raw_signal(arguments)
-                    except Exception:
-                        logging.exception("get bias corrected signal failed")
 
-                    # get motif length, number and pwm matrix
-                    motif_len.append(mpbs_regions[0].final - mpbs_regions[0].initial)
-                    motif_num.append(len(mpbs_regions))
-                    motif_pwm.append(get_pwm(fasta, mpbs_regions, args.window_size))
+                    signals[i, j, :] = get_raw_signal(arguments)
 
         # use multi-processing
         else:
-            pool = Pool(processes=args.nc)
             for i, condition in enumerate(conditions):
-                arguments_list = list()
-                for mpbs_name in mpbs_name_list:
-                    mpbs_regions = mpbs.by_names([mpbs_name])
-                    arguments = (mpbs_regions, reads_files[i], args.organism, args.window_size, args.forward_shift,
-                                 args.reverse_shift)
-                    arguments_list.append(arguments)
+                print("{}: generating signal for condition {} ...\n".format(time.strftime("%D-%H:%M:%S"),
+                                                                            condition))
+                with Pool(processes=args.nc) as pool:
+                    arguments_list = list()
+                    for mpbs_name in mpbs_name_list:
+                        mpbs_regions = mpbs_regions_by_name[mpbs_name]
+                        arguments = (mpbs_regions, reads_files[i], args.organism, args.window_size, args.forward_shift,
+                                     args.reverse_shift)
+                        arguments_list.append(arguments)
 
-                    # get motif length, number and pwm matrix
-                    motif_len.append(mpbs_regions[0].final - mpbs_regions[0].initial)
-                    motif_num.append(len(mpbs_regions))
-                    motif_pwm.append(get_pwm(fasta, mpbs_regions, args.window_size))
-
-                try:
-                    res = pool.map_async(get_raw_signal, arguments_list)
+                    res = pool.map(get_raw_signal, arguments_list)
                     signals[i] = np.array(res)
-                    pool.close()
-                    pool.join()
-                    del pool
-                except Exception:
-                    logging.exception("get bias corrected signal failed")
 
-    print("signal generation is done!")
+    print("{}: signal generation is done!".format(time.strftime("%D-%H:%M:%S")))
 
     # compute normalization facotr for each condition
     factors = compute_factors(signals)
@@ -232,21 +225,19 @@ def diff_analysis_run(args):
     if args.output_profiles:
         output_profiles(mpbs_name_list, signals, conditions, args.output_location)
 
-    print("generating line plot for each motif...\n")
+    print("{}: generating line plot for each motif...\n".format(time.strftime("%D-%H:%M:%S")))
     if args.nc == 1:
         for i, mpbs_name in enumerate(mpbs_name_list):
             output_line_plot((mpbs_name, motif_num[i], signals[:, i, :], conditions, motif_pwm[i], output_location,
                               args.window_size, colors))
     else:
-        pool = Pool(processes=args.nc)
-        arguments_list = list()
-        for i, mpbs_name in enumerate(mpbs_name_list):
-            arguments_list.append((mpbs_name, motif_num[i], signals[:, i, :], conditions, motif_pwm[i], output_location,
-                                   args.window_size, colors))
-        pool.map_async(output_line_plot, arguments_list)
-        pool.close()
-        pool.join()
-        del pool
+        with Pool(processes=args.nc) as pool:
+            arguments_list = list()
+            for i, mpbs_name in enumerate(mpbs_name_list):
+                arguments_list.append(
+                    (mpbs_name, motif_num[i], signals[:, i, :], conditions, motif_pwm[i], output_location,
+                     args.window_size, colors))
+            pool.map(output_line_plot, arguments_list)
 
     ps_tc_results = list()
     for i, mpbs_name in enumerate(mpbs_name_list):
@@ -298,9 +289,9 @@ def get_bc_signal(arguments):
     signal = np.zeros(window_size)
     # Fetch bias corrected signal
     for region in mpbs_region:
-        mid = (region.final + region.initial) / 2
-        p1 = mid - window_size / 2
-        p2 = mid + window_size / 2
+        mid = int((region.final + region.initial) / 2)
+        p1 = int(mid - window_size / 2)
+        p2 = int(mid + window_size / 2)
 
         if p1 <= 0:
             continue
@@ -320,7 +311,7 @@ def get_bc_signal(arguments):
 def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forward_shift, reverse_shift):
     # Parameters
     window = 50
-    defaultKmerValue = 1.0
+    default_kmer_value = 1.0
 
     # Initialization
     fastaFile = Fastafile(genome_file_name)
@@ -329,13 +320,13 @@ def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forwar
     k_nb = len(list(fBiasDict.keys())[0])
     p1 = start
     p2 = end
-    p1_w = p1 - (window / 2)
-    p2_w = p2 + (window / 2)
+    p1_w = int(p1 - (window / 2))
+    p2_w = int(p2 + (window / 2))
     p1_wk = p1_w - int(floor(k_nb / 2.))
     p2_wk = p2_w + int(ceil(k_nb / 2.))
     if p1 <= 0 or p1_w <= 0 or p1_wk <= 0 or p2_wk <= 0:
         # Return raw counts
-        bc_signal = [0.0] * (p2 - p1)
+        bc_signal = np.zeros(2 - p1)
         for read in bam.fetch(chrom, p1, p2):
             # check if the read is unmapped, according to issue #112
             if read.is_unmapped:
@@ -353,8 +344,8 @@ def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forwar
         return bc_signal
 
     # Raw counts
-    nf = [0.0] * (p2_w - p1_w)
-    nr = [0.0] * (p2_w - p1_w)
+    nf = np.zeros(p2_w - p1_w)
+    nr = np.zeros(p2_w - p1_w)
     for read in bam.fetch(chrom, p1_w, p2_w):
         # check if the read is unmapped, according to issue #112
         if read.is_unmapped:
@@ -376,15 +367,15 @@ def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forwar
     r_sum = sum(nr[:window])
     f_last = nf[0]
     r_last = nr[0]
-    for i in range((window / 2), len(nf) - (window / 2)):
+    for i in range(int((window / 2)), len(nf) - int((window / 2))):
         Nf.append(f_sum)
         Nr.append(r_sum)
         f_sum -= f_last
-        f_sum += nf[i + (window / 2)]
-        f_last = nf[i - (window / 2) + 1]
+        f_sum += nf[i + int((window / 2))]
+        f_last = nf[i - int((window / 2)) + 1]
         r_sum -= r_last
-        r_sum += nr[i + (window / 2)]
-        r_last = nr[i - (window / 2) + 1]
+        r_sum += nr[i + int((window / 2))]
+        r_last = nr[i - int((window / 2)) + 1]
 
     # Fetching sequence
     currStr = str(fastaFile.fetch(chrom, p1_wk, p2_wk - 1)).upper()
@@ -399,11 +390,11 @@ def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forwar
         try:
             af.append(fBiasDict[fseq])
         except Exception:
-            af.append(defaultKmerValue)
+            af.append(default_kmer_value)
         try:
             ar.append(rBiasDict[rseq])
         except Exception:
-            ar.append(defaultKmerValue)
+            ar.append(default_kmer_value)
 
     # Calculating bias and writing to wig file
     f_sum = sum(af[:window])
@@ -411,16 +402,16 @@ def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forwar
     f_last = af[0]
     r_last = ar[0]
     bc_signal = []
-    for i in range((window / 2), len(af) - (window / 2)):
-        nhatf = Nf[i - (window / 2)] * (af[i] / f_sum)
-        nhatr = Nr[i - (window / 2)] * (ar[i] / r_sum)
+    for i in range(int((window / 2)), len(af) - int((window / 2))):
+        nhatf = Nf[i - int((window / 2))] * (af[i] / f_sum)
+        nhatr = Nr[i - int((window / 2))] * (ar[i] / r_sum)
         bc_signal.append(nhatf + nhatr)
         f_sum -= f_last
-        f_sum += af[i + (window / 2)]
-        f_last = af[i - (window / 2) + 1]
+        f_sum += af[i + int((window / 2))]
+        f_last = af[i - int((window / 2)) + 1]
         r_sum -= r_last
-        r_sum += ar[i + (window / 2)]
-        r_last = ar[i - (window / 2) + 1]
+        r_sum += ar[i + int((window / 2))]
+        r_last = ar[i - int((window / 2)) + 1]
 
     # Termination
     fastaFile.close()
@@ -429,9 +420,11 @@ def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forwar
 
 def get_ps_tc_results(signals, motif_len, window_size):
     signal_half_len = window_size / 2
-    nc = np.sum(signals[:, signal_half_len - motif_len / 2:signal_half_len + motif_len / 2], axis=1)
-    nr = np.sum(signals[:, signal_half_len + motif_len / 2:signal_half_len + motif_len / 2 + motif_len], axis=1)
-    nl = np.sum(signals[:, signal_half_len - motif_len / 2 - motif_len:signal_half_len - motif_len / 2], axis=1)
+    nc = np.sum(signals[:, int(signal_half_len - motif_len / 2):int(signal_half_len + motif_len / 2)], axis=1)
+    nr = np.sum(signals[:, int(signal_half_len + motif_len / 2):int(signal_half_len + motif_len / 2 + motif_len)],
+                axis=1)
+    nl = np.sum(signals[:, int(signal_half_len - motif_len / 2 - motif_len):int(signal_half_len - motif_len / 2)],
+                axis=1)
 
     protect_scores = (nr - nc) / motif_len + (nl - nc) / motif_len
 
@@ -440,10 +433,14 @@ def get_ps_tc_results(signals, motif_len, window_size):
     return [protect_scores, tcs]
 
 
-def get_pwm(fasta, regions, window_size):
+def get_pwm(arguments):
+    (organism, regions, window_size) = arguments
     pwm = dict([("A", [0.0] * window_size), ("C", [0.0] * window_size),
                 ("G", [0.0] * window_size), ("T", [0.0] * window_size),
                 ("N", [0.0] * window_size)])
+
+    genome_data = GenomeData(organism)
+    fasta = Fastafile(genome_data.get_genome())
 
     for region in regions:
         middle = (region.initial + region.final) / 2

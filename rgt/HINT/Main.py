@@ -1,13 +1,7 @@
-
 import sys
 import time
 from random import seed
 from argparse import ArgumentParser
-
-import warnings
-
-if not sys.warnoptions:
-    warnings.simplefilter("ignore")
 
 # Internal
 from rgt import __version__
@@ -19,6 +13,13 @@ from rgt.HINT.Estimation import estimation_args, estimation_run
 from rgt.HINT.Evaluation import evaluation_args, evaluation_run
 from rgt.HINT.Evidence import evidence_args, evidence_run
 from rgt.HINT.Tracks import tracks_args, tracks_run
+
+import warnings
+
+if not sys.warnoptions:
+    warnings.simplefilter("ignore")
+
+
 
 """
 HINT - HMM-based Identification of TF Footprints.
@@ -99,4 +100,4 @@ def main():
     h, m = divmod(m, 60)
 
     print()
-    print("[total time: ", "%dh %dm %ds" % (h, m, s), "]", sep="")
+    print("[total time: ", "%dh %dm %ds" % (h, m, s), "]")

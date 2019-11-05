@@ -17,17 +17,15 @@ def estimation_args(parser):
     parser.add_argument("--organism", type=str, metavar="STRING", default="hg19",
                         help="Organism considered on the analysis. Must have been setup in the RGTDATA folder. "
                              "Common choices are hg19, hg38. mm9, and mm10. DEFAULT: hg19")
-    parser.add_argument("--bias-type", type=str, metavar="STRING", default="VOM",
+    parser.add_argument("--bias-type", type=str, metavar="STRING", default="KMER",
                         help="The methods that used to estimate the bias table "
-                             "Available options are: 'KMER', 'PWM' and 'VOM'. DEFAULT: VOM")
+                             "Available options are: 'KMER', 'PWM' and 'VOM'. DEFAULT: KMER")
     parser.add_argument("--reads-file", type=str, metavar="FILE", default=None,
                         help="The BAM file containing aligned reads. DEFAULT: None")
     parser.add_argument("--regions-file", type=str, metavar="FILE", default=None,
                         help="The BED file containing regions to estimate the bias. DEFAULT: None")
-    parser.add_argument("--downstream-ext", type=int, metavar="INT", default=1)
-    parser.add_argument("--upstream-ext", type=int, metavar="INT", default=0)
     parser.add_argument("--forward-shift", type=int, metavar="INT", default=4)
-    parser.add_argument("--reverse-shift", type=int, metavar="INT", default=-4)
+    parser.add_argument("--reverse-shift", type=int, metavar="INT", default=-5)
     parser.add_argument("--k-nb", type=int, metavar="INT", default=8,
                         help="Size of k-mer for bias estimation. DEFAULT: 8")
 
@@ -49,136 +47,138 @@ def estimation_run(args):
 
 def estimate_bias_kmer(args):
     # Parameters
-    maxDuplicates = 100
-    pseudocount = 1.0
+    max_duplicates = 100
+    pseudo_count = 1.0
 
     # Initializing bam and fasta
-    bamFile = Samfile(args.reads_file, "rb")
+    bam = Samfile(args.reads_file, "rb")
     genome_data = GenomeData(args.organism)
-    fastaFile = Fastafile(genome_data.get_genome())
+    fasta = Fastafile(genome_data.get_genome())
     regions = GenomicRegionSet("regions")
     regions.read(args.regions_file)
 
     # Initializing dictionaries
-    obsDictF = dict()
-    obsDictR = dict()
-    expDictF = dict()
-    expDictR = dict()
+    obs_dict_f = dict()
+    obs_dict_r = dict()
+    exp_dict_f = dict()
+    exp_dict_r = dict()
 
     ct_reads_r = 0
     ct_reads_f = 0
-    ct_kmers = 0
+    ct_kmer = 0
 
-    # Iterating on HS regions
     for region in regions:
 
         # Initialization
-        prevPos = -1
-        trueCounter = 0
+        prev_pos = -1
+        true_counter = 0
 
         # Evaluating observed frequencies ####################################
         # Fetching reads
-        for r in bamFile.fetch(region.chrom, region.initial, region.final):
+        for r in bam.fetch(region.chrom, region.initial, region.final):
 
             # Calculating positions
             if not r.is_reverse:
-                cut_site = r.pos + args.forward_shift - 1
-                p1 = cut_site - int(floor(args.k_nb / 2))
+                cut_site = r.pos + args.forward_shift
+                p1 = cut_site - int(args.k_nb / 2)
             else:
-                cut_site = r.aend + args.reverse_shift + 1
-                p1 = cut_site - int(floor(args.k_nb / 2))
+                cut_site = r.aend + args.reverse_shift - 1
+                p1 = cut_site - int(args.k_nb / 2)
             p2 = p1 + args.k_nb
 
             # Verifying PCR artifacts
-            if p1 == prevPos:
-                trueCounter += 1
+            if p1 == prev_pos:
+                true_counter += 1
             else:
-                prevPos = p1
-                trueCounter = 0
-            if trueCounter > maxDuplicates: continue
+                prev_pos = p1
+                true_counter = 0
+
+            if true_counter > max_duplicates:
+                continue
 
             # Fetching k-mer
             try:
-                currStr = str(fastaFile.fetch(region.chrom, p1, p2)).upper()
+                curr_str = str(fasta.fetch(region.chrom, p1, p2)).upper()
             except Exception:
                 continue
-            if r.is_reverse: currStr = AuxiliaryFunctions.revcomp(currStr)
+            if r.is_reverse:
+                curr_str = AuxiliaryFunctions.revcomp(curr_str)
 
             # Counting k-mer in dictionary
             if not r.is_reverse:
                 ct_reads_f += 1
                 try:
-                    obsDictF[currStr] += 1
+                    obs_dict_f[curr_str] += 1
                 except Exception:
-                    obsDictF[currStr] = 1
+                    obs_dict_f[curr_str] = 1
             else:
                 ct_reads_r += 1
                 try:
-                    obsDictR[currStr] += 1
+                    obs_dict_r[curr_str] += 1
                 except Exception:
-                    obsDictR[currStr] = 1
+                    obs_dict_r[curr_str] = 1
 
         # Evaluating expected frequencies ####################################
         # Fetching whole sequence
         try:
-            currStr = str(fastaFile.fetch(region.chrom, region.initial, region.final)).upper()
+            curr_str = str(fasta.fetch(region.chrom, region.initial, region.final)).upper()
         except Exception:
             continue
-        currRevComp = AuxiliaryFunctions.revcomp(currStr)
+        curr_str_comp = AuxiliaryFunctions.revcomp(curr_str)
 
         # Iterating on each sequence position
-        for i in range(0, len(currStr) - args.k_nb):
-            ct_kmers += 1
+        for i in range(0, len(curr_str) - args.k_nb):
+            ct_kmer += 1
             # Counting k-mer in dictionary
-            s = currStr[i:i + args.k_nb]
+            s = curr_str[i:i + args.k_nb]
             try:
-                expDictF[s] += 1
+                exp_dict_f[s] += 1
             except Exception:
-                expDictF[s] = 1
+                exp_dict_f[s] = 1
 
             # Counting k-mer in dictionary for reverse complement
-            s = currRevComp[i:i + args.k_nb]
+            s = curr_str_comp[i:i + args.k_nb]
             try:
-                expDictR[s] += 1
+                exp_dict_r[s] += 1
             except Exception:
-                expDictR[s] = 1
+                exp_dict_r[s] = 1
 
     # Closing files
-    bamFile.close()
-    fastaFile.close()
+    bam.close()
+    fasta.close()
 
     # Creating bias dictionary
     alphabet = ["A", "C", "G", "T"]
-    kmerComb = ["".join(e) for e in product(alphabet, repeat=args.k_nb)]
-    bias_table_F = dict([(e, 0.0) for e in kmerComb])
-    bias_table_R = dict([(e, 0.0) for e in kmerComb])
-    for kmer in kmerComb:
+    kmer_comb = ["".join(e) for e in product(alphabet, repeat=args.k_nb)]
+    bias_table_f = dict([(e, 0.0) for e in kmer_comb])
+    bias_table_r = dict([(e, 0.0) for e in kmer_comb])
+    for kmer in kmer_comb:
         try:
-            obsF = obsDictF[kmer] + pseudocount
+            obs_f = obs_dict_f[kmer] + pseudo_count
         except Exception:
-            obsF = pseudocount
+            obs_f = pseudo_count
         try:
-            expF = expDictF[kmer] + pseudocount
+            exp_f = exp_dict_f[kmer] + pseudo_count
         except Exception:
-            expF = pseudocount
+            exp_f = pseudo_count
         if ct_reads_f == 0:
-            bias_table_F[kmer] = 1
+            bias_table_f[kmer] = 1
         else:
-            bias_table_F[kmer] = round(float(obsF / ct_reads_f) / float(expF / ct_kmers), 6)
+            bias_table_f[kmer] = round((obs_f / ct_reads_f) / (exp_f / ct_kmer), 6)
         try:
-            obsR = obsDictR[kmer] + pseudocount
+            obs_r = obs_dict_r[kmer] + pseudo_count
         except Exception:
-            obsR = pseudocount
+            obs_r = pseudo_count
         try:
-            expR = expDictR[kmer] + pseudocount
+            exp_r = exp_dict_r[kmer] + pseudo_count
         except Exception:
-            expR = pseudocount
+            exp_r = pseudo_count
         if ct_reads_r == 0:
-            bias_table_R[kmer] = 1
+            bias_table_r[kmer] = 1
         else:
-            bias_table_R[kmer] = round(float(obsR / ct_reads_r) / float(expR / ct_kmers), 6)
+            bias_table_r[kmer] = round((obs_r / ct_reads_r) / (exp_r / ct_kmer), 6)
 
-    write_table(args.output_location, args.output_prefix, [bias_table_F, bias_table_R])
+    write_table(args.output_location, args.output_prefix, [bias_table_r, bias_table_r])
 
 
 def estimate_bias_pwm(args):
@@ -820,13 +820,17 @@ def read_model(input_fname, k_nb):
                                     ll = lines[idx + 98]  # read P_9
                                     setting_dict["P_9(p|c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
                                     ll = lines[idx + 99]  # read P_9
-                                    setting_dict["P_9(x|y=A,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                    setting_dict["P_9(x|y=A,c=1)"] = list(
+                                        map(float, ll.split("=")[-1][1:-2].split(",")))
                                     ll = lines[idx + 100]  # read P_9
-                                    setting_dict["P_9(x|y=C,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                    setting_dict["P_9(x|y=C,c=1)"] = list(
+                                        map(float, ll.split("=")[-1][1:-2].split(",")))
                                     ll = lines[idx + 101]  # read P_9
-                                    setting_dict["P_9(x|y=G,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                    setting_dict["P_9(x|y=G,c=1)"] = list(
+                                        map(float, ll.split("=")[-1][1:-2].split(",")))
                                     ll = lines[idx + 102]  # read P_9
-                                    setting_dict["P_9(x|y=T,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                    setting_dict["P_9(x|y=T,c=1)"] = list(
+                                        map(float, ll.split("=")[-1][1:-2].split(",")))
 
                                     if k_nb == 10:
                                         model_list.append(setting_dict)
@@ -835,19 +839,25 @@ def read_model(input_fname, k_nb):
                                         ll = lines[idx + 105]  # read P_10
                                         setting_dict["P_10(c=0)"] = float(ll.split("=")[-1])
                                         ll = lines[idx + 106]  # read P_10
-                                        setting_dict["P_10(x|c=0)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                        setting_dict["P_10(x|c=0)"] = list(
+                                            map(float, ll.split("=")[-1][1:-2].split(",")))
                                         ll = lines[idx + 108]  # read P_10
                                         setting_dict["P_10(c=1)"] = float(ll.split("=")[-1])
                                         ll = lines[idx + 109]  # read P_10
-                                        setting_dict["P_10(p|c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                        setting_dict["P_10(p|c=1)"] = list(
+                                            map(float, ll.split("=")[-1][1:-2].split(",")))
                                         ll = lines[idx + 110]  # read P_10
-                                        setting_dict["P_10(x|y=A,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                        setting_dict["P_10(x|y=A,c=1)"] = list(
+                                            map(float, ll.split("=")[-1][1:-2].split(",")))
                                         ll = lines[idx + 111]  # read P_10
-                                        setting_dict["P_10(x|y=C,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                        setting_dict["P_10(x|y=C,c=1)"] = list(
+                                            map(float, ll.split("=")[-1][1:-2].split(",")))
                                         ll = lines[idx + 112]  # read P_10
-                                        setting_dict["P_10(x|y=G,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                        setting_dict["P_10(x|y=G,c=1)"] = list(
+                                            map(float, ll.split("=")[-1][1:-2].split(",")))
                                         ll = lines[idx + 113]  # read P_10
-                                        setting_dict["P_10(x|y=T,c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                        setting_dict["P_10(x|y=T,c=1)"] = list(
+                                            map(float, ll.split("=")[-1][1:-2].split(",")))
 
                                         if k_nb == 11:
                                             model_list.append(setting_dict)
@@ -856,23 +866,29 @@ def read_model(input_fname, k_nb):
                                             ll = lines[idx + 116]  # read P_11
                                             setting_dict["P_11(c=0)"] = float(ll.split("=")[-1])
                                             ll = lines[idx + 117]  # read P_11
-                                            setting_dict["P_11(x|c=0)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                            setting_dict["P_11(x|c=0)"] = list(
+                                                map(float, ll.split("=")[-1][1:-2].split(",")))
                                             ll = lines[idx + 119]  # read P_11
                                             setting_dict["P_11(c=1)"] = float(ll.split("=")[-1])
                                             ll = lines[idx + 120]  # read P_11
-                                            setting_dict["P_11(p|c=1)"] = list(map(float, ll.split("=")[-1][1:-2].split(",")))
+                                            setting_dict["P_11(p|c=1)"] = list(
+                                                map(float, ll.split("=")[-1][1:-2].split(",")))
                                             ll = lines[idx + 121]  # read P_11
                                             setting_dict["P_11(x|y=A,c=1)"] = list(map(float,
-                                                                                  ll.split("=")[-1][1:-2].split(",")))
+                                                                                       ll.split("=")[-1][1:-2].split(
+                                                                                           ",")))
                                             ll = lines[idx + 122]  # read P_11
                                             setting_dict["P_11(x|y=C,c=1)"] = list(map(float,
-                                                                                  ll.split("=")[-1][1:-2].split(",")))
+                                                                                       ll.split("=")[-1][1:-2].split(
+                                                                                           ",")))
                                             ll = lines[idx + 123]  # read P_11
                                             setting_dict["P_11(x|y=G,c=1)"] = list(map(float,
-                                                                                  ll.split("=")[-1][1:-2].split(",")))
+                                                                                       ll.split("=")[-1][1:-2].split(
+                                                                                           ",")))
                                             ll = lines[idx + 124]  # read P_11
                                             setting_dict["P_11(x|y=T,c=1)"] = list(map(float,
-                                                                                  ll.split("=")[-1][1:-2].split(",")))
+                                                                                       ll.split("=")[-1][1:-2].split(
+                                                                                           ",")))
 
                                             model_list.append(setting_dict)
     return model_list

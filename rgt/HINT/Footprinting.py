@@ -1,5 +1,3 @@
-
-
 import os
 from copy import deepcopy
 from argparse import SUPPRESS
@@ -8,7 +6,7 @@ from argparse import SUPPRESS
 from rgt.Util import ErrorHandler, HmmData, GenomeData, OverlapType
 from rgt.GenomicRegion import GenomicRegion
 from rgt.GenomicRegionSet import GenomicRegionSet
-from rgt.HINT.signalProcessing import GenomicSignal
+from rgt.HINT.GenomicSignal import GenomicSignal
 from rgt.HINT.hmm import HMM, _compute_log_likelihood
 from rgt.HINT.biasTable import BiasTable
 

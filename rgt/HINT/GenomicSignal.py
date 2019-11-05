@@ -1,6 +1,3 @@
-###################################################################################################
-# Libraries
-###################################################################################################
 from math import log, ceil, floor, isnan
 import numpy as np
 from numpy import exp, array, abs, int, mat, linalg, convolve, nan_to_num
@@ -52,6 +49,133 @@ class GenomicSignal:
         None -- It updates self.sg_coefs.
         """
         self.sg_coefs = self.savitzky_golay_coefficients(slope_window_size, 2, 1)
+
+    def get_raw_signal(self, chromosome, start, end, forward_shift, reverse_shift, initial_clip=1000,
+                       strand_specific=False):
+        """
+        Gets the raw signal associated with self.bam
+
+        chromosome: Chromosome name.
+        start: Initial genomic coordinate of signal.
+        end: Final genomic coordinate of signal.
+        forward_shift: Number of bps to shift the reads aligned to the forward strand.
+        reverse_shift: Number of bps to shift the reads aligned to the reverse strand.
+        initial_clip: Signal will be initially clipped at this level to avoid outliers.
+        strand_specific: If set, will return signal for forward and reverse strand
+        :return:
+        """
+        # extend regions for 500 bps
+        start = start - 500
+        end = end + 500
+
+        start = 0 if start < 0 else start
+
+        signal_forward = np.zeros(end - start)
+        signal_reverse = np.zeros(end - start)
+
+        for read in self.bam.fetch(chromosome, start, end):
+            # check if the read is unmapped, according to issue #112
+            if read.is_unmapped:
+                continue
+
+            if not read.is_reverse:
+                cut_site = read.reference_start + forward_shift
+                if start <= cut_site < end:
+                    signal_forward[cut_site - start] += 1.0
+            else:
+                cut_site = read.reference_end + reverse_shift - 1
+                if start <= cut_site < end:
+                    signal_reverse[cut_site - start] += 1.0
+
+        if strand_specific:
+            signal_forward = np.array([min(e, initial_clip) for e in signal_forward])
+            signal_reverse = np.array([min(e, initial_clip) for e in signal_reverse])
+
+            return signal_forward, signal_reverse
+
+        else:
+            signal = np.add(signal_forward, signal_reverse)
+            signal = np.array([min(e, initial_clip) for e in signal])
+
+            return signal
+
+    def get_raw_norm_signal(self, chromosome, start, end, forward_shift, reverse_shift, initial_clip=1000,
+                            norm_window=100, per_norm=98, per_slope=98):
+        """
+        Gets the raw signal associated with self.bam after normalization
+
+        chromosome: Chromosome name.
+        start: Initial genomic coordinate of signal.
+        end: Final genomic coordinate of signal.
+        forward_shift: Number of bps to shift the reads aligned to the forward strand.
+        reverse_shift: Number of bps to shift the reads aligned to the reverse strand.
+        initial_clip: Signal will be initially clipped at this level to avoid outliers.
+        norm_window: Window size for within-dataset normalization, using 1-bk by default
+        per_norm: Percentile value for 'hon_norm' function of the normalized signal.
+        per_slope: Percentile value for 'hon_norm' function of the slope signal.
+        :return:
+        """
+
+        raw_signal = self.get_raw_signal(chromosome=chromosome,
+                                         start=start - int(norm_window / 2),
+                                         end=end + int(norm_window / 2),
+                                         forward_shift=forward_shift,
+                                         reverse_shift=reverse_shift)
+
+        norm_signal = np.zeros(end - start)
+        for i in range(len(norm_signal)):
+            non_zero_signal_mean = raw_signal[i:i + norm_window].sum() / np.count_nonzero(raw_signal[i:i + norm_window])
+            norm_signal[i] = raw_signal[i + int(norm_window / 2)] / non_zero_signal_mean
+
+        perc = scoreatpercentile(norm_signal, per_norm)
+        std = norm_signal.std()
+        if std == 0:
+            return norm_signal
+        else:
+            norm_signal =
+
+        norm_signal = self.hon_norm_atac(norm_signal, perc, std)
+
+        if std != 0:
+            norm_seq = []
+            for e in sequence:
+                if e == 0:
+                    norm_seq.append(e)
+                else:
+                    norm_seq.append(1.0 / (1.0 + (exp(-(e - mean) / std))))
+            return norm_seq
+        else:
+            return sequence
+
+        return norm_signal
+
+    def get_bc_signal(self, chromosome, start, end, forward_shift, reverse_shift, initial_clip=1000,
+                      fasta_file=None, bias_table=None):
+        """
+        Gets the bias corrected signal associated with self.bam
+
+        chromosome: Chromosome name.
+        start: Initial genomic coordinate of signal.
+        end: Final genomic coordinate of signal.
+        forward_shift: Number of bps to shift the reads aligned to the forward strand.
+        reverse_shift: Number of bps to shift the reads aligned to the reverse strand.
+        initial_clip: Signal will be initially clipped at this level to avoid outliers.
+        :return:
+        """
+        assert fasta_file is not None, "Please provide a fasta file for bias correction!"
+        assert bias_table is not None, "No bias table is available!"
+
+        raw_signal = self.get_raw_signal(chromosome=chromosome,
+                                         start=start,
+                                         end=end,
+                                         forward_shift=forward_shift,
+                                         reverse_shift=reverse_shift)
+
+        # Parameters
+        window = 50
+        default_kmer_value = 1.0
+
+        return raw_signal
 
     def get_tag_count(self, ref, start, end, downstream_ext, upstream_ext, forward_shift, reverse_shift,
                       initial_clip=1000):
@@ -599,7 +723,8 @@ class GenomicSignal:
                 norm_seq.append(-1.0 / (1.0 + (exp(-(-e - mean) / std))))
         return norm_seq
 
-    def boyle_norm(self, sequence):
+    @staticmethod
+    def boyle_norm(sequence):
         """
         Normalizes a sequence according to Boyle's criterion.
         This represents a within-dataset normalization.
