@@ -1,13 +1,6 @@
-import os
-import numpy as np
-import pandas as pd
-import pysam
 import time
 
-import logomaker
-from pysam import Samfile, Fastafile
 from math import ceil, floor
-
 from scipy.stats import zscore
 from scipy.stats import norm
 from argparse import SUPPRESS
@@ -15,10 +8,9 @@ from argparse import SUPPRESS
 from multiprocessing import Pool, cpu_count
 
 # Internal
-from rgt.Util import ErrorHandler, AuxiliaryFunctions, GenomeData, HmmData
+from rgt.Util import ErrorHandler, HmmData
 from rgt.GenomicRegionSet import GenomicRegionSet
-from rgt.HINT.biasTable import BiasTable
-from rgt.HINT.Util import get_pwm
+from rgt.HINT.Util import *
 
 import matplotlib.pyplot as plt
 
@@ -152,7 +144,7 @@ def diff_analysis_run(args):
         hmm_data = HmmData()
         table_forward = hmm_data.get_default_bias_table_F_ATAC()
         table_reverse = hmm_data.get_default_bias_table_R_ATAC()
-        bias_table = BiasTable().load_table(table_file_name_F=table_forward, table_file_name_R=table_reverse)
+        bias_table = load_bias_table(table_file_name_f=table_forward, table_file_name_r=table_reverse)
 
         # do not use multi-processing
         if args.nc == 1:
@@ -229,8 +221,9 @@ def diff_analysis_run(args):
     print("{}: generating line plot for each motif...\n".format(time.strftime("%D-%H:%M:%S")))
     if args.nc == 1:
         for i, mpbs_name in enumerate(mpbs_name_list):
-            output_line_plot((mpbs_name, motif_num[i], signals[:, i, :], conditions, motif_pwm[i], output_location,
-                              args.window_size, colors))
+            output_line_plot_multi_conditions(
+                (mpbs_name, motif_num[i], signals[:, i, :], conditions, motif_pwm[i], output_location,
+                 args.window_size, colors))
     else:
         with Pool(processes=args.nc) as pool:
             arguments_list = list()
@@ -238,7 +231,7 @@ def diff_analysis_run(args):
                 arguments_list.append(
                     (mpbs_name, motif_num[i], signals[:, i, :], conditions, motif_pwm[i], output_location,
                      args.window_size, colors))
-            pool.map(output_line_plot, arguments_list)
+            pool.map(output_line_plot_multi_conditions, arguments_list)
 
     ps_tc_results = list()
     for i, mpbs_name in enumerate(mpbs_name_list):
@@ -254,7 +247,7 @@ def diff_analysis_run(args):
 def get_raw_signal(arguments):
     (mpbs_region, reads_file, organism, window_size, forward_shift, reverse_shift) = arguments
 
-    bam = Samfile(reads_file, "rb")
+    bam = pysam.Samfile(reads_file, "rb")
     signal = np.zeros(window_size)
 
     for region in mpbs_region:
@@ -285,7 +278,7 @@ def get_raw_signal(arguments):
 def get_bc_signal(arguments):
     (mpbs_region, reads_file, organism, window_size, forward_shift, reverse_shift, bias_table) = arguments
 
-    bam = Samfile(reads_file, "rb")
+    bam = pysam.Samfile(reads_file, "rb")
     genome_data = GenomeData(organism)
     signal = np.zeros(window_size)
     # Fetch bias corrected signal
@@ -315,7 +308,7 @@ def bias_correction(chrom, start, end, bam, bias_table, genome_file_name, forwar
     default_kmer_value = 1.0
 
     # Initialization
-    fastaFile = Fastafile(genome_file_name)
+    fastaFile = pysam.Fastafile(genome_file_name)
     fBiasDict = bias_table[0]
     rBiasDict = bias_table[1]
     k_nb = len(list(fBiasDict.keys())[0])
@@ -442,72 +435,6 @@ def compute_factors(signals):
     factors = np.exp(np.median(signals_log, axis=1))
 
     return factors
-
-
-def output_line_plot(arguments):
-    (mpbs_name, mpbs_num, signals, conditions, pwm, output_location, window_size, colors) = arguments
-    mpbs_name = mpbs_name.replace("(", "_").replace(")", "")
-
-    # output signal
-    output_filename = os.path.join(output_location, "{}.txt".format(mpbs_name))
-    with open(output_filename, "w") as f:
-        f.write("\t".join(conditions) + "\n")
-        for i in range(window_size):
-            res = []
-            for j, condition in enumerate(conditions):
-                res.append(signals[j][i])
-
-            f.write("\t".join(map(str, res)) + "\n")
-
-    # to create a motif loge, we only use A, C, G, T
-    pwm = {k: pwm[k] for k in ('A', 'C', 'G', 'T')}
-    pwm = pd.DataFrame(data=pwm)
-    pwm = pwm.add(1)
-    pwm_prob = (pwm.T / pwm.T.sum()).T
-    pwm_prob_log = np.log2(pwm_prob)
-    pwm_prob_log = pwm_prob_log.mul(pwm_prob)
-    info_content = pwm_prob_log.T.sum() + 2
-    icm = pwm_prob.mul(info_content, axis=0)
-
-    start = -(window_size / 2)
-    end = (window_size / 2) - 1
-    x = np.linspace(start, end, num=window_size)
-
-    plt.close('all')
-    fig, ax = plt.subplots()
-    for i, condition in enumerate(conditions):
-        ax.plot(x, signals[i], color=colors[i], label=condition)
-
-    ax.text(0.15, 0.9, 'n = {}'.format(mpbs_num), verticalalignment='bottom', horizontalalignment='right',
-            transform=ax.transAxes, fontweight='bold')
-
-    ax.xaxis.set_ticks_position('bottom')
-    ax.yaxis.set_ticks_position('left')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_position(('outward', 15))
-    ax.tick_params(direction='out')
-    ax.set_xticks([start, 0, end])
-    ax.set_xticklabels([str(start), 0, str(end)])
-    min_signal = np.min(signals)
-    max_signal = np.max(signals)
-    ax.set_yticks([min_signal, max_signal])
-    ax.set_yticklabels([str(round(min_signal, 2)), str(round(max_signal, 2))], rotation=90)
-
-    ax.set_title(mpbs_name, fontweight='bold')
-    ax.set_xlim(start, end)
-    ax.set_ylim([min_signal, max_signal])
-    ax.legend(loc="upper right", frameon=False)
-    ax.spines['bottom'].set_position(('outward', 70))
-
-    ax = plt.axes([0.105, 0.085, 0.85, .2])
-    logo = logomaker.Logo(icm, ax=ax, show_spines=False, baseline_width=0)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    fig.tight_layout()
-
-    output_filename = os.path.join(output_location, "{}.pdf".format(mpbs_name))
-    plt.savefig(output_filename)
 
 
 def scatter_plot(args, ps_tc_results, mpbs_name_list, conditions):

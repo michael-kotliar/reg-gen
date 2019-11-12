@@ -6,16 +6,15 @@ from scipy.signal import savgol_filter
 from scipy.stats import scoreatpercentile
 from argparse import SUPPRESS
 import time
-import logomaker
 import matplotlib.pyplot as plt
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 
 # Internal
 from rgt.Util import GenomeData, AuxiliaryFunctions, ErrorHandler
 from rgt.HINT.GenomicSignal import GenomicSignal
 from rgt.GenomicRegionSet import GenomicRegionSet
-from rgt.HINT.biasTable import BiasTable
-from rgt.HINT.Util import get_pwm
+from rgt.HINT.BiasTable import BiasTable
+from rgt.HINT.Util import *
 
 
 def plotting_args(parser):
@@ -31,8 +30,6 @@ def plotting_args(parser):
 
     # Hidden Options
     parser.add_argument("--initial-clip", type=int, metavar="INT", default=50, help=SUPPRESS)
-    parser.add_argument("--downstream-ext", type=int, metavar="INT", default=1, help=SUPPRESS)
-    parser.add_argument("--upstream-ext", type=int, metavar="INT", default=0, help=SUPPRESS)
     parser.add_argument("--forward-shift", type=int, metavar="INT", default=4, help=SUPPRESS)
     parser.add_argument("--reverse-shift", type=int, metavar="INT", default=-5, help=SUPPRESS)
     parser.add_argument("--k-nb", type=int, metavar="INT", default=6, help=SUPPRESS)
@@ -46,10 +43,9 @@ def plotting_args(parser):
 
     # plot type
     parser.add_argument("--raw", default=False, action='store_true')
+    parser.add_argument("--strand-specific", default=False, action='store_true')
     parser.add_argument("--bias-raw-bc-line", default=False, action='store_true')
     parser.add_argument("--raw-bc-line", default=False, action='store_true')
-    parser.add_argument("--strand-line", default=False, action='store_true')
-    parser.add_argument("--unstrand-line", default=False, action='store_true')
     parser.add_argument("--bias-line", default=False, action='store_true')
     parser.add_argument("--atac-dnase-line", default=False, action='store_true')
     parser.add_argument("--bias-raw-bc-strand-line2", default=False, action='store_true')
@@ -62,16 +58,13 @@ def plotting_args(parser):
 
 def plotting_run(args):
     if args.raw:
-        line_raw_signal(args=args)
+        if args.strand_specific:
+            line_raw_signal_strand(args=args)
+        else:
+            line_raw_signal(args=args)
 
     if args.bias_raw_bc_line:
         bias_raw_bc_strand_line(args)
-
-    if args.strand_line:
-        strand_line(args)
-
-    if args.unstrand_line:
-        unstrand_line(args)
 
     if args.raw_bc_line:
         raw_bc_line(args)
@@ -86,31 +79,7 @@ def plotting_run(args):
         fragment_size_bc_line(args)
 
 
-def get_raw_signal(arguments):
-    (bam_file, regions, organism, window_size, forward_shift, reverse_shift) = arguments
-
-    genomic_signal = GenomicSignal(bam_file)
-
-    signal = np.zeros(window_size)
-    for region in regions:
-        mid = (region.final + region.initial) / 2
-        p1 = mid - window_size / 2
-        p2 = mid + window_size / 2
-        if p1 <= 0:
-            continue
-
-        signal += genomic_signal.get_raw_signal(chromosome=region.chrom,
-                                                start=p1,
-                                                end=p2,
-                                                forward_shift=forward_shift,
-                                                reverse_shift=reverse_shift,
-                                                strand_specific=False)
-
-    signal /= len(regions)
-    return signal
-
-
-def line_raw_signal(args):
+def get_data_for_region(args):
     # Initializing Error Handler
     err = ErrorHandler()
 
@@ -160,10 +129,92 @@ def line_raw_signal(args):
             for i, mpbs_name in enumerate(region_name_list):
                 region_pwm.append(pwm_list[i])
 
-    print("{}: generating signal for each factor...\n".format(time.strftime("%D-%H:%M:%S"),
-                                                              len(regions)))
+    return bam_file, region_name_list, mpbs_regions_by_name, region_len, region_num, region_pwm
 
-    signals = np.zeros(len(region_name_list), args.window_size, dtype=np.float32)
+
+def get_raw_signal(arguments):
+    (bam_file, regions, organism, window_size, forward_shift, reverse_shift) = arguments
+
+    genomic_signal = GenomicSignal(bam_file)
+
+    signal = np.zeros(window_size)
+    for region in regions:
+        mid = (region.final + region.initial) / 2
+        p1 = int(mid - window_size / 2)
+        p2 = int(mid + window_size / 2)
+        if p1 <= 0:
+            continue
+
+        signal += genomic_signal.get_raw_signal(chromosome=region.chrom,
+                                                start=p1,
+                                                end=p2,
+                                                forward_shift=forward_shift,
+                                                reverse_shift=reverse_shift,
+                                                strand_specific=False)
+
+    signal /= len(regions)
+    return signal
+
+
+def get_bc_signal(arguments):
+    (bam_file, regions, organism, window_size, forward_shift, reverse_shift) = arguments
+
+    genomic_signal = GenomicSignal(bam_file)
+
+    signal = np.zeros(window_size)
+    for region in regions:
+        mid = (region.final + region.initial) / 2
+        p1 = int(mid - window_size / 2)
+        p2 = int(mid + window_size / 2)
+        if p1 <= 0:
+            continue
+
+        signal += genomic_signal.get_raw_signal(chromosome=region.chrom,
+                                                start=p1,
+                                                end=p2,
+                                                forward_shift=forward_shift,
+                                                reverse_shift=reverse_shift,
+                                                strand_specific=False)
+
+    signal /= len(regions)
+    return signal
+
+
+def get_raw_signal_strand(arguments):
+    (bam_file, regions, organism, window_size, forward_shift, reverse_shift) = arguments
+
+    genomic_signal = GenomicSignal(bam_file)
+
+    signal_forward, signal_reverse = np.zeros(window_size), np.zeros(window_size)
+    for region in regions:
+        mid = (region.final + region.initial) / 2
+        p1 = int(mid - window_size / 2)
+        p2 = int(mid + window_size / 2)
+        if p1 <= 0:
+            continue
+
+        signal_f, signal_r = genomic_signal.get_raw_signal(chromosome=region.chrom,
+                                                           start=p1,
+                                                           end=p2,
+                                                           forward_shift=forward_shift,
+                                                           reverse_shift=reverse_shift,
+                                                           strand_specific=True)
+
+        signal_forward += signal_f
+        signal_reverse += signal_r
+
+    signal_forward /= len(regions)
+    signal_reverse /= len(regions)
+
+    return signal_forward, signal_reverse
+
+
+def line_raw_signal(args):
+    bam_file, region_name_list, mpbs_regions_by_name, region_len, region_num, region_pwm = get_data_for_region(args)
+
+    print("{}: generating signal for each factor...\n".format(time.strftime("%D-%H:%M:%S")))
+
+    signals = np.zeros(shape=(len(region_name_list), args.window_size), dtype=np.float32)
     if args.nc == 1:
         for i, region_name in enumerate(region_name_list):
             regions = mpbs_regions_by_name[region_name]
@@ -171,6 +222,81 @@ def line_raw_signal(args):
                          args.reverse_shift)
 
             signals[i] = get_raw_signal(arguments)
+    else:
+        with Pool(processes=args.nc) as pool:
+            arguments_list = list()
+            for i, region_name in enumerate(region_name_list):
+                regions = mpbs_regions_by_name[region_name]
+                arguments_list.append([bam_file, regions, args.organism, args.window_size, args.forward_shift,
+                                       args.reverse_shift])
+
+            signal_list = pool.map(get_raw_signal, arguments_list)
+            for i, region_name in enumerate(region_name_list):
+                signals[i] = signal_list[i]
+
+    print("{}: generating plot for each factor...\n".format(time.strftime("%D-%H:%M:%S")))
+
+    if args.nc == 1:
+        for i, region_name in enumerate(region_name_list):
+            arguments = (region_name, region_num[i], signals[i], region_pwm[i], args.output_location,
+                         args.window_size)
+            output_line_plot(arguments)
+    else:
+        with Pool(processes=args.nc) as pool:
+            arguments_list = list()
+            for i, region_name in enumerate(region_name_list):
+                arguments_list.append([region_name, region_num[i], signals[i], region_pwm[i], args.output_location,
+                                       args.window_size])
+
+            pool.map(output_line_plot, arguments_list)
+
+
+def line_raw_signal_strand(args):
+    bam_file, region_name_list, mpbs_regions_by_name, region_len, region_num, region_pwm = get_data_for_region(args)
+
+    print("{}: generating signal for each factor...\n".format(time.strftime("%D-%H:%M:%S")))
+
+    signals_forward = np.zeros(shape=(len(region_name_list), args.window_size), dtype=np.float32)
+    signals_reverse = np.zeros(shape=(len(region_name_list), args.window_size), dtype=np.float32)
+    if args.nc == 1:
+        for i, region_name in enumerate(region_name_list):
+            regions = mpbs_regions_by_name[region_name]
+            arguments = (bam_file, regions, args.organism, args.window_size, args.forward_shift,
+                         args.reverse_shift)
+
+            signals_forward[i], signals_reverse[i] = get_raw_signal_strand(arguments)
+    else:
+        with Pool(processes=args.nc) as pool:
+            arguments_list = list()
+            for i, region_name in enumerate(region_name_list):
+                regions = mpbs_regions_by_name[region_name]
+                arguments_list.append([bam_file, regions, args.organism, args.window_size, args.forward_shift,
+                                       args.reverse_shift])
+
+            signal_list = pool.map(get_raw_signal, arguments_list)
+            for i, region_name in enumerate(region_name_list):
+                signals_forward[i] = signal_list[i][0]
+                signals_reverse[i] = signal_list[i][0]
+
+    print("{}: generating plot for each factor...\n".format(time.strftime("%D-%H:%M:%S")))
+
+    if args.nc == 1:
+        for i, region_name in enumerate(region_name_list):
+            arguments = (region_name, region_num[i], signals_forward[i], signals_reverse[i], region_pwm[i],
+                         args.output_location, args.window_size)
+            output_line_plot_strand(arguments)
+    else:
+        with Pool(processes=args.nc) as pool:
+            arguments_list = list()
+            for i, region_name in enumerate(region_name_list):
+                arguments_list.append([region_name, region_num[i], signals_forward[i], signals_reverse[i],
+                                       region_pwm[i], args.output_location, args.window_size])
+
+            pool.map(output_line_plot_strand, arguments_list)
+
+
+def line_bc_signal(args):
+    bam_file, region_name_list, mpbs_regions_by_name, region_len, region_num, region_pwm = get_data_for_region(args)
 
 
 def bias_raw_bc_line(args):
@@ -182,7 +308,7 @@ def bias_raw_bc_line(args):
                                   table_file_name_R=bias_table_list[1])
 
     genome_data = GenomeData(args.organism)
-    fasta = Fastafile(genome_data.get_genome())
+    fasta = pysam.Fastafile(genome_data.get_genome())
     pwm_dict = dict([("A", [0.0] * args.window_size), ("C", [0.0] * args.window_size),
                      ("G", [0.0] * args.window_size), ("T", [0.0] * args.window_size),
                      ("N", [0.0] * args.window_size)])
@@ -911,299 +1037,6 @@ def bias_raw_bc_strand_line2(args):
     os.remove(os.path.join(args.output_location, "{}.logo.eps".format(args.output_prefix)))
     os.remove(os.path.join(args.output_location, "{}.line.pdf".format(args.output_prefix)))
     os.remove(os.path.join(args.output_location, "{}.logo.pdf".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.eps".format(args.output_prefix)))
-
-
-def strand_line(args):
-    genomic_signal = GenomicSignal(args.reads_file)
-    genomic_signal.load_sg_coefs(slope_window_size=9)
-
-    table = None
-    if args.bias_table is not None:
-        bias_table = BiasTable()
-        bias_table_list = args.bias_table.split(",")
-        table = bias_table.load_table(table_file_name_F=bias_table_list[0],
-                                      table_file_name_R=bias_table_list[1])
-
-    genome_data = GenomeData(args.organism)
-    fasta = Fastafile(genome_data.get_genome())
-
-    num_sites = 0
-    mpbs_regions = GenomicRegionSet("Motif Predicted Binding Sites")
-    mpbs_regions.read(args.motif_file)
-    bam = Samfile(args.reads_file, "rb")
-
-    mean_signal_f = np.zeros(args.window_size)
-    mean_signal_r = np.zeros(args.window_size)
-
-    pwm_dict = None
-    for region in mpbs_regions:
-        if str(region.name).split(":")[-1] == "Y":
-            # Extend by 50 bp
-            mid = (region.initial + region.final) / 2
-            p1 = mid - (args.window_size / 2)
-            p2 = mid + (args.window_size / 2)
-
-            if args.bias_table is not None:
-                signal_f, signal_r = genomic_signal.get_bc_signal_by_fragment_length(ref=region.chrom, start=p1,
-                                                                                     end=p2, bam=bam, fasta=fasta,
-                                                                                     bias_table=table,
-                                                                                     forward_shift=args.forward_shift,
-                                                                                     reverse_shift=args.reverse_shift)
-            else:
-                signal_f, signal_r = genomic_signal.get_raw_signal_by_fragment_length(ref=region.chrom, start=p1,
-                                                                                      end=p2,
-                                                                                      bam=bam,
-                                                                                      forward_shift=args.forward_shift,
-                                                                                      reverse_shift=args.reverse_shift)
-
-            num_sites += 1
-
-            mean_signal_f = np.add(mean_signal_f, signal_f)
-            mean_signal_r = np.add(mean_signal_r, signal_r)
-
-            # Update pwm
-
-            if pwm_dict is None:
-                pwm_dict = dict([("A", [0.0] * (p2 - p1)), ("C", [0.0] * (p2 - p1)),
-                                 ("G", [0.0] * (p2 - p1)), ("T", [0.0] * (p2 - p1)),
-                                 ("N", [0.0] * (p2 - p1))])
-
-            aux_plus = 1
-            dna_seq = str(fasta.fetch(region.chrom, p1, p2)).upper()
-            if (region.final - region.initial) % 2 == 0:
-                aux_plus = 0
-            dna_seq_rev = AuxiliaryFunctions.revcomp(str(fasta.fetch(region.chrom,
-                                                                     p1 + aux_plus, p2 + aux_plus)).upper())
-            if region.orientation == "+":
-                for i in range(0, len(dna_seq)):
-                    pwm_dict[dna_seq[i]][i] += 1
-            elif region.orientation == "-":
-                for i in range(0, len(dna_seq_rev)):
-                    pwm_dict[dna_seq_rev[i]][i] += 1
-
-    mean_norm_signal_f = genomic_signal.boyle_norm(mean_signal_f)
-    perc = scoreatpercentile(mean_norm_signal_f, 98)
-    std = np.std(mean_norm_signal_f)
-    mean_norm_signal_f = genomic_signal.hon_norm_atac(mean_norm_signal_f, perc, std)
-
-    mean_norm_signal_r = genomic_signal.boyle_norm(mean_signal_r)
-    perc = scoreatpercentile(mean_norm_signal_r, 98)
-    std = np.std(mean_norm_signal_r)
-    mean_norm_signal_r = genomic_signal.hon_norm_atac(mean_norm_signal_r, perc, std)
-
-    mean_slope_signal_f = genomic_signal.slope(mean_norm_signal_f, genomic_signal.sg_coefs)
-    mean_slope_signal_r = genomic_signal.slope(mean_norm_signal_r, genomic_signal.sg_coefs)
-
-    # Output the norm and slope signal
-    output_fname = os.path.join(args.output_location, "{}.txt".format(args.output_prefix))
-    f = open(output_fname, "w")
-    f.write("\t".join((list(map(str, mean_norm_signal_f)))) + "\n")
-    f.write("\t".join((list(map(str, mean_slope_signal_f)))) + "\n")
-    f.write("\t".join((list(map(str, mean_norm_signal_r)))) + "\n")
-    f.write("\t".join((list(map(str, mean_slope_signal_r)))) + "\n")
-    f.close()
-
-    # Output PWM and create logo
-    pwm_fname = os.path.join(args.output_location, "{}.pwm".format(args.output_prefix))
-    pwm_file = open(pwm_fname, "w")
-    for e in ["A", "C", "G", "T"]:
-        pwm_file.write(" ".join([str(int(f)) for f in pwm_dict[e]]) + "\n")
-    pwm_file.close()
-
-    logo_fname = os.path.join(args.output_location, "{}.logo.eps".format(args.output_prefix))
-    pwm = motifs.read(open(pwm_fname), "pfm")
-    pwm.weblogo(logo_fname, format="eps", stack_width="large", stacks_per_line=str(args.window_size),
-                color_scheme="color_classic", unit_name="", show_errorbars=False, logo_title="",
-                show_xaxis=False, xaxis_label="", show_yaxis=False, yaxis_label="",
-                show_fineprint=False, show_ends=False)
-
-    start = -(args.window_size / 2)
-    end = (args.window_size / 2) - 1
-    x = np.linspace(start, end, num=args.window_size)
-
-    fig = plt.figure(figsize=(8, 4))
-    ax = fig.add_subplot(111)
-
-    min_signal = min(min(mean_signal_f), min(mean_signal_r))
-    max_signal = max(max(mean_signal_f), max(mean_signal_r))
-    ax.plot(x, mean_signal_f, color='red', label='Forward')
-    ax.plot(x, mean_signal_r, color='green', label='Reverse')
-    ax.set_title(args.output_prefix, fontweight='bold')
-
-    ax.xaxis.set_ticks_position('bottom')
-    ax.yaxis.set_ticks_position('left')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_position(('outward', 15))
-    ax.tick_params(direction='out')
-    ax.set_xticks([start, 0, end])
-    ax.set_xticklabels([str(start), 0, str(end)])
-    ax.set_yticks([min_signal, max_signal])
-    ax.set_yticklabels([str(round(min_signal, 2)), str(round(max_signal, 2))], rotation=90)
-    ax.set_xlim(start, end)
-    ax.set_ylim([min_signal, max_signal])
-    ax.legend(loc="upper right", frameon=False)
-    ax.spines['bottom'].set_position(('outward', 40))
-
-    figure_name = os.path.join(args.output_location, "{}.line.eps".format(args.output_prefix))
-    fig.subplots_adjust(bottom=.2, hspace=.5)
-    fig.tight_layout()
-    fig.savefig(figure_name, format="eps", dpi=300)
-
-    # Creating canvas and printing eps / pdf with merged results
-    output_fname = os.path.join(args.output_location, "{}.eps".format(args.output_prefix))
-    c = pyx.canvas.canvas()
-    c.insert(pyx.epsfile.epsfile(0, 0, figure_name, scale=1.0))
-    c.insert(pyx.epsfile.epsfile(1.37, 0.89, logo_fname, width=18.5, height=1.75))
-    c.writeEPSfile(output_fname)
-    os.system("epstopdf " + figure_name)
-    os.system("epstopdf " + logo_fname)
-    os.system("epstopdf " + output_fname)
-
-    # os.remove(pwm_fname)
-    os.remove(os.path.join(args.output_location, "{}.line.eps".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.logo.eps".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.line.pdf".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.logo.pdf".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.eps".format(args.output_prefix)))
-
-
-def unstrand_line(args):
-    genomic_signal = GenomicSignal(args.reads_file)
-    genomic_signal.load_sg_coefs(slope_window_size=9)
-
-    table = None
-    if args.bias_table is not None:
-        bias_table = BiasTable()
-        bias_table_list = args.bias_table.split(",")
-        table = bias_table.load_table(table_file_name_F=bias_table_list[0], table_file_name_R=bias_table_list[1])
-
-    genome_data = GenomeData(args.organism)
-    fasta = Fastafile(genome_data.get_genome())
-
-    num_sites = 0
-    mpbs_regions = GenomicRegionSet("Motif Predicted Binding Sites")
-    mpbs_regions.read(args.motif_file)
-    bam = Samfile(args.reads_file, "rb")
-
-    mean_signal = np.zeros(args.window_size)
-
-    pwm_dict = None
-    output_fname = os.path.join(args.output_location, "{}.txt".format(args.output_prefix))
-
-    with open(output_fname, "w") as output_f:
-        for region in mpbs_regions:
-            mid = (region.initial + region.final) / 2
-            p1 = mid - (args.window_size / 2)
-            p2 = mid + (args.window_size / 2)
-
-            if args.bias_table is not None:
-                signal = genomic_signal.get_bc_signal_by_fragment_length(ref=region.chrom, start=p1, end=p2,
-                                                                         bam=bam, fasta=fasta,
-                                                                         bias_table=table,
-                                                                         forward_shift=args.forward_shift,
-                                                                         reverse_shift=args.reverse_shift,
-                                                                         strand=False)
-            else:
-                signal = genomic_signal.get_raw_signal_by_fragment_length(ref=region.chrom, start=p1, end=p2,
-                                                                          bam=bam,
-                                                                          forward_shift=args.forward_shift,
-                                                                          reverse_shift=args.reverse_shift,
-                                                                          strand=False)
-
-            if region.orientation == "-":
-                signal = np.flip(signal)
-
-            name = "{}_{}_{}".format(region.chrom, str(region.initial), str(region.final))
-            output_f.write(name + "\t" + "\t".join(map(str, list(map(int, signal)))) + "\n")
-            num_sites += 1
-
-            mean_signal = np.add(mean_signal, signal)
-
-            # Update pwm
-            if pwm_dict is None:
-                pwm_dict = dict([("A", [0.0] * (p2 - p1)), ("C", [0.0] * (p2 - p1)),
-                                 ("G", [0.0] * (p2 - p1)), ("T", [0.0] * (p2 - p1)),
-                                 ("N", [0.0] * (p2 - p1))])
-
-            aux_plus = 1
-            dna_seq = str(fasta.fetch(region.chrom, p1, p2)).upper()
-            if (region.final - region.initial) % 2 == 0:
-                aux_plus = 0
-            dna_seq_rev = AuxiliaryFunctions.revcomp(
-                str(fasta.fetch(region.chrom, p1 + aux_plus, p2 + aux_plus)).upper())
-            if region.orientation == "+":
-                for i in range(0, len(dna_seq)):
-                    pwm_dict[dna_seq[i]][i] += 1
-            elif region.orientation == "-":
-                for i in range(0, len(dna_seq_rev)):
-                    pwm_dict[dna_seq_rev[i]][i] += 1
-
-    mean_signal = mean_signal / num_sites
-
-    # Output PWM and create logo
-    pwm_fname = os.path.join(args.output_location, "{}.pwm".format(args.output_prefix))
-    pwm_file = open(pwm_fname, "w")
-    for e in ["A", "C", "G", "T"]:
-        pwm_file.write(" ".join([str(int(f)) for f in pwm_dict[e]]) + "\n")
-    pwm_file.close()
-
-    logo_fname = os.path.join(args.output_location, "{}.logo.eps".format(args.output_prefix))
-    pwm = motifs.read(open(pwm_fname), "pfm")
-    pwm.weblogo(logo_fname, format="eps", stack_width="large", stacks_per_line=str(args.window_size),
-                color_scheme="color_classic", unit_name="", show_errorbars=False, logo_title="",
-                show_xaxis=False, xaxis_label="", show_yaxis=False, yaxis_label="",
-                show_fineprint=False, show_ends=False)
-
-    start = -(args.window_size / 2)
-    end = (args.window_size / 2) - 1
-    x = np.linspace(start, end, num=args.window_size)
-
-    fig = plt.figure(figsize=(8, 4))
-    ax = fig.add_subplot(111)
-
-    min_signal = min(mean_signal)
-    max_signal = max(mean_signal)
-    ax.plot(x, mean_signal, color='red')
-    ax.set_title(args.output_prefix, fontweight='bold')
-
-    ax.xaxis.set_ticks_position('bottom')
-    ax.yaxis.set_ticks_position('left')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_position(('outward', 15))
-    ax.tick_params(direction='out')
-    ax.set_xticks([start, 0, end])
-    ax.set_xticklabels([str(start), 0, str(end)])
-    ax.set_yticks([min_signal, max_signal])
-    ax.set_yticklabels([str(round(min_signal, 2)), str(round(max_signal, 2))], rotation=90)
-    ax.set_xlim(start, end)
-    ax.set_ylim([min_signal, max_signal])
-    ax.legend(loc="upper right", frameon=False)
-
-    ax.spines['bottom'].set_position(('outward', 40))
-
-    figure_name = os.path.join(args.output_location, "{}.line.eps".format(args.output_prefix))
-    fig.subplots_adjust(bottom=.2, hspace=.5)
-    fig.tight_layout()
-    fig.savefig(figure_name, format="eps", dpi=300)
-
-    # Creating canvas and printing eps / pdf with merged results
-    output_fname = os.path.join(args.output_location, "{}.eps".format(args.output_prefix))
-    c = pyx.canvas.canvas()
-    c.insert(pyx.epsfile.epsfile(0, 0, figure_name, scale=1.0))
-    c.insert(pyx.epsfile.epsfile(1.31, 0.89, logo_fname, width=18.5, height=1.75))
-    c.writeEPSfile(output_fname)
-    os.system("epstopdf " + figure_name)
-    os.system("epstopdf " + logo_fname)
-    os.system("epstopdf " + output_fname)
-
-    os.remove(pwm_fname)
-    os.remove(os.path.join(args.output_location, "{}.line.eps".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.logo.eps".format(args.output_prefix)))
-    os.remove(os.path.join(args.output_location, "{}.line.pdf".format(args.output_prefix)))
-    # os.remove(os.path.join(args.output_location, "{}.logo.pdf".format(args.output_prefix)))
     os.remove(os.path.join(args.output_location, "{}.eps".format(args.output_prefix)))
 
 

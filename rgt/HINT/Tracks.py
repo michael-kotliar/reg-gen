@@ -1,13 +1,11 @@
-import os
-from argparse import SUPPRESS
-import numpy as np
-import pysam
 import time
+from argparse import SUPPRESS
 
 # Internal
-from rgt.Util import GenomeData, ErrorHandler
+from rgt.Util import ErrorHandler
 from rgt.GenomicRegionSet import GenomicRegionSet
 from rgt.HINT.GenomicSignal import GenomicSignal
+from rgt.HINT.Util import *
 
 
 def tracks_args(parser):
@@ -22,20 +20,24 @@ def tracks_args(parser):
     parser.add_argument("--initial-clip", type=int, metavar="INT", default=1000, help=SUPPRESS)
     parser.add_argument("--forward-shift", type=int, metavar="INT", default=4, help=SUPPRESS)
     parser.add_argument("--reverse-shift", type=int, metavar="INT", default=-5, help=SUPPRESS)
-    parser.add_argument("--norm-window", type=int, metavar="INT", default=100, help=SUPPRESS)
+    parser.add_argument("--norm-window", type=int, metavar="INT", default=1000, help=SUPPRESS)
+    parser.add_argument("--extend-window", type=int, metavar="INT", default=100, help=SUPPRESS)
     parser.add_argument("--k-nb", type=int, metavar="INT", default=6, help=SUPPRESS)
 
     # Output Options
     parser.add_argument("--raw", action="store_true", default=False,
-                        help="If set, the raw signals from DNase-seq or ATAC-seq data will be generated. "
+                        help="Generate the raw signals from DNase-seq or ATAC-seq data"
                              "DEFAULT: False")
     parser.add_argument("--raw-norm", action="store_true", default=False,
-                        help="If set, the normalized raw signals from DNase-seq or ATAC-seq data will be generated. "
+                        help="Generate the normalized raw signals from DNase-seq or ATAC-seq data"
+                             "DEFAULT: False")
+    parser.add_argument("--raw-slope", action="store_true", default=False,
+                        help="Generate the slope of normalized raw signals from DNase-seq or ATAC-seq data"
                              "DEFAULT: False")
     parser.add_argument("--bc", action="store_true", default=False,
                         help="If set, the bias corrected signals from DNase-seq or ATAC-seq data will be generated. "
                              "DEFAULT: False")
-    parser.add_argument("--norm", action="store_true", default=False,
+    parser.add_argument("--bc-norm", action="store_true", default=False,
                         help="If set, the normalised signals from DNase-seq or ATAC-seq data will be generated. "
                              "DEFAULT: False")
     parser.add_argument("--bigWig", action="store_true", default=False,
@@ -59,6 +61,8 @@ def tracks_run(args):
         get_raw_tracks(args=args)
     elif args.raw_norm:
         get_raw_norm_tracks(args=args)
+    elif args.raw_slope:
+        get_raw_slope_tracks(args=args)
 
 
 def get_raw_tracks(args):
@@ -79,6 +83,9 @@ def get_raw_tracks(args):
     regions.merge()
     genomic_signal = GenomicSignal(bam_file)
 
+    chrom_sizes_dict = get_chromosome_size(args.organism)
+    half_extend_window = int(args.extend_window / 2)
+
     print("{}: generating signal for {} regions...\n".format(time.strftime("%D-%H:%M:%S"),
                                                              len(regions)))
     if args.strand_specific:
@@ -88,19 +95,21 @@ def get_raw_tracks(args):
         output_reverse_f = open(output_reverse_filename, "a")
 
         for region in regions:
+            start = max(region.initial - half_extend_window, 0)
+            end = min(region.final + half_extend_window, chrom_sizes_dict[region.chrom])
             signal_forward, signal_reverse = genomic_signal.get_raw_signal(chromosome=region.chrom,
-                                                                           start=region.initial,
-                                                                           end=region.final,
+                                                                           start=start,
+                                                                           end=end,
                                                                            forward_shift=args.forward_shift,
                                                                            reverse_shift=args.reverse_shift,
                                                                            initial_clip=args.initial_clip,
                                                                            strand_specific=True)
 
             output_forward_f.write(
-                "fixedStep chrom=" + region.chrom + " start=" + str(region.initial + 1) + " step=1\n" +
+                "fixedStep chrom=" + region.chrom + " start=" + str(start + 1) + " step=1\n" +
                 "\n".join([str(e) for e in np.nan_to_num(signal_forward)]) + "\n")
             output_reverse_f.write(
-                "fixedStep chrom=" + region.chrom + " start=" + str(region.initial + 1) + " step=1\n" +
+                "fixedStep chrom=" + region.chrom + " start=" + str(start + 1) + " step=1\n" +
                 "\n".join([str(e) for e in np.nan_to_num(signal_reverse)]) + "\n")
 
         output_forward_f.close()
@@ -122,15 +131,17 @@ def get_raw_tracks(args):
         output_f = open(output_filename, "a")
 
         for region in regions:
+            start = max(region.initial - half_extend_window, 0)
+            end = min(region.final + half_extend_window, chrom_sizes_dict[region.chrom])
             signal = genomic_signal.get_raw_signal(chromosome=region.chrom,
-                                                   start=region.initial,
-                                                   end=region.final,
+                                                   start=start,
+                                                   end=end,
                                                    forward_shift=args.forward_shift,
                                                    reverse_shift=args.reverse_shift,
                                                    initial_clip=args.initial_clip,
                                                    strand_specific=False)
 
-            output_f.write("fixedStep chrom=" + region.chrom + " start=" + str(region.initial + 1) + " step=1\n" +
+            output_f.write("fixedStep chrom=" + region.chrom + " start=" + str(start + 1) + " step=1\n" +
                            "\n".join([str(e) for e in np.nan_to_num(signal)]) + "\n")
         output_f.close()
 
@@ -163,20 +174,71 @@ def get_raw_norm_tracks(args):
     regions.merge()
     genomic_signal = GenomicSignal(args.input_files[0])
 
+    chrom_sizes_dict = get_chromosome_size(args.organism)
+
     print("{}: generating signal for {} regions...\n".format(time.strftime("%D-%H:%M:%S"),
                                                              len(regions)))
     with open(output_fname, "a") as output_f:
         for region in regions:
-            signal = genomic_signal.get_raw_norm_signal(chromosome=region.chrom,
-                                                        start=region.initial,
-                                                        end=region.final,
-                                                        forward_shift=args.forward_shift,
-                                                        reverse_shift=args.reverse_shift,
-                                                        initial_clip=args.initial_clip,
-                                                        norm_window=args.norm_window)
+            signal, _ = genomic_signal.get_raw_norm_signal(chromosome=region.chrom,
+                                                           chromosome_size=chrom_sizes_dict[region.chrom],
+                                                           start=region.initial,
+                                                           end=region.final,
+                                                           forward_shift=args.forward_shift,
+                                                           reverse_shift=args.reverse_shift,
+                                                           initial_clip=args.initial_clip,
+                                                           norm_window=args.norm_window)
 
             output_f.write("fixedStep chrom=" + region.chrom + " start=" + str(region.initial + 1) + " step=1\n" +
                            "\n".join([str(e) for e in np.nan_to_num(signal)]) + "\n")
+    output_f.close()
+
+    if args.bigWig:
+        genome_data = GenomeData(args.organism)
+        chrom_sizes_file = genome_data.get_chromosome_sizes()
+        bw_filename = os.path.join(args.output_location, "{}.bw".format(args.output_prefix))
+        os.system(" ".join(["wigToBigWig", output_fname, chrom_sizes_file, bw_filename, "-verbose=0"]))
+        os.remove(output_fname)
+
+
+def get_raw_slope_tracks(args):
+    # Initializing Error Handler
+    err = ErrorHandler()
+
+    if len(args.input_files) != 2:
+        err.throw_error("ME_FEW_ARG", add_msg="You must specify reads and regions file.")
+
+    output_fname = os.path.join(args.output_location, "{}.wig".format(args.output_prefix))
+
+    bam_file, region_file = args.input_files[0], args.input_files[1]
+
+    # check if index exists for bam file
+    bam_index_file = "{}.bai".format(bam_file)
+    if not os.path.exists(bam_index_file):
+        pysam.index(bam_file)
+
+    regions = GenomicRegionSet("Interested regions")
+    regions.read(region_file)
+    regions.merge()
+    genomic_signal = GenomicSignal(args.input_files[0])
+
+    chrom_sizes_dict = get_chromosome_size(args.organism)
+
+    print("{}: generating signal for {} regions...\n".format(time.strftime("%D-%H:%M:%S"),
+                                                             len(regions)))
+    with open(output_fname, "a") as output_f:
+        for region in regions:
+            _, slope = genomic_signal.get_raw_norm_signal(chromosome=region.chrom,
+                                                          chromosome_size=chrom_sizes_dict[region.chrom],
+                                                          start=region.initial,
+                                                          end=region.final,
+                                                          forward_shift=args.forward_shift,
+                                                          reverse_shift=args.reverse_shift,
+                                                          initial_clip=args.initial_clip,
+                                                          norm_window=args.norm_window)
+
+            output_f.write("fixedStep chrom=" + region.chrom + " start=" + str(region.initial + 1) + " step=1\n" +
+                           "\n".join([str(e) for e in np.nan_to_num(slope)]) + "\n")
     output_f.close()
 
     if args.bigWig:

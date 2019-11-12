@@ -1,9 +1,10 @@
 from math import log, ceil, floor, isnan
 import numpy as np
-from numpy import exp, array, abs, int, mat, linalg, convolve, nan_to_num
+from numpy import exp, array, abs, int, mat, linalg, nan_to_num
 from pysam import Samfile, Fastafile
 from pysam import __version__ as ps_version
 from scipy.stats import scoreatpercentile
+from scipy.signal import savgol_filter
 
 # Internal
 from rgt.Util import AuxiliaryFunctions
@@ -53,7 +54,7 @@ class GenomicSignal:
     def get_raw_signal(self, chromosome, start, end, forward_shift, reverse_shift, initial_clip=1000,
                        strand_specific=False):
         """
-        Gets the raw signal associated with self.bam
+        Gets the raw signal associated with self.bam, mainly used for visualization
 
         chromosome: Chromosome name.
         start: Initial genomic coordinate of signal.
@@ -64,12 +65,6 @@ class GenomicSignal:
         strand_specific: If set, will return signal for forward and reverse strand
         :return:
         """
-        # extend regions for 500 bps
-        start = start - 500
-        end = end + 500
-
-        start = 0 if start < 0 else start
-
         signal_forward = np.zeros(end - start)
         signal_reverse = np.zeros(end - start)
 
@@ -99,10 +94,10 @@ class GenomicSignal:
 
             return signal
 
-    def get_raw_norm_signal(self, chromosome, start, end, forward_shift, reverse_shift, initial_clip=1000,
-                            norm_window=100, per_norm=98, per_slope=98):
+    def get_raw_norm_signal(self, chromosome, chromosome_size, start, end, forward_shift, reverse_shift,
+                            initial_clip=1000, norm_window=10000, per_norm=98):
         """
-        Gets the raw signal associated with self.bam after normalization
+        Gets the raw signal associated with self.bam after normalization, mainly used for HMM training and inference
 
         chromosome: Chromosome name.
         start: Initial genomic coordinate of signal.
@@ -111,43 +106,37 @@ class GenomicSignal:
         reverse_shift: Number of bps to shift the reads aligned to the reverse strand.
         initial_clip: Signal will be initially clipped at this level to avoid outliers.
         norm_window: Window size for within-dataset normalization, using 1-bk by default
-        per_norm: Percentile value for 'hon_norm' function of the normalized signal.
-        per_slope: Percentile value for 'hon_norm' function of the slope signal.
+        per_norm: Percentile value for 'hon_norm' function of the slope signal.
         :return:
         """
+        half_window = int(norm_window / 2)
+        region_length = end - start
+
+        start = max(start - half_window, 0)
+        end = min(end + half_window, chromosome_size)
 
         raw_signal = self.get_raw_signal(chromosome=chromosome,
-                                         start=start - int(norm_window / 2),
-                                         end=end + int(norm_window / 2),
+                                         start=start,
+                                         end=end,
                                          forward_shift=forward_shift,
-                                         reverse_shift=reverse_shift)
+                                         reverse_shift=reverse_shift,
+                                         initial_clip=initial_clip)
 
-        norm_signal = np.zeros(end - start)
-        for i in range(len(norm_signal)):
-            non_zero_signal_mean = raw_signal[i:i + norm_window].sum() / np.count_nonzero(raw_signal[i:i + norm_window])
-            norm_signal[i] = raw_signal[i + int(norm_window / 2)] / non_zero_signal_mean
+        norm_signal = np.zeros(region_length)
+        for i in range(half_window, region_length + half_window):
+            non_zero_mean = raw_signal[i - half_window:i + half_window].sum() / np.count_nonzero(
+                raw_signal[i - half_window:i + half_window])
 
-        # perc = scoreatpercentile(norm_signal, per_norm)
-        # std = norm_signal.std()
-        # if std == 0:
-        #     return norm_signal
-        # else:
-        #     norm_signal =
-        #
-        # norm_signal = self.hon_norm_atac(norm_signal, perc, std)
-        #
-        # if std != 0:
-        #     norm_seq = []
-        #     for e in sequence:
-        #         if e == 0:
-        #             norm_seq.append(e)
-        #         else:
-        #             norm_seq.append(1.0 / (1.0 + (exp(-(e - mean) / std))))
-        #     return norm_seq
-        # else:
-        #     return sequence
+            norm_signal[i - half_window] = raw_signal[i] / non_zero_mean
 
-        return norm_signal
+        prec = scoreatpercentile(norm_signal, per=per_norm)
+        std = norm_signal.std()
+        norm_signal = 1 / (1 + exp(- (norm_signal - prec) / std))
+
+        smooth_signal = savgol_filter(norm_signal, 9, 2)
+        slope_signal = savgol_filter(norm_signal, 9, 2, deriv=1)
+
+        return smooth_signal, slope_signal
 
     def get_bc_signal(self, chromosome, start, end, forward_shift, reverse_shift, initial_clip=1000,
                       fasta_file=None, bias_table=None):
@@ -785,7 +774,7 @@ class GenomicSignal:
         Return:
         slope_seq -- Slope sequence.
         """
-        slope_seq = convolve(sequence, sg_coefs)
+        slope_seq = np.convolve(sg_coefs, sequence)
         slope_seq = [e for e in slope_seq[(len(sg_coefs) // 2):(len(slope_seq) - (len(sg_coefs) // 2))]]
 
         return slope_seq
