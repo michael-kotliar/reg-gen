@@ -13,7 +13,6 @@ from multiprocessing import Pool
 from rgt.Util import GenomeData, AuxiliaryFunctions, ErrorHandler
 from rgt.HINT.GenomicSignal import GenomicSignal
 from rgt.GenomicRegionSet import GenomicRegionSet
-from rgt.HINT.BiasTable import BiasTable
 from rgt.HINT.Util import *
 
 
