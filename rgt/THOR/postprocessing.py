@@ -147,7 +147,7 @@ def _output_BED(name, output, pvalues, filter):
     
     for i in range(len(pvalues)):
         c, s, e, strand, counts = output[i]
-        p_tmp = -log10(pvalues[i]) if pvalues[i] > 0 else sys.maxint
+        p_tmp = pvalues[i] if pvalues[i] > 0 else sys.maxint
         counts = ';'.join(counts.split(';')[:2] + [str(p_tmp)])
         
         if filter[i]:
@@ -161,7 +161,7 @@ def _output_narrowPeak(name, output, pvalues, filter):
     f = open(name + '-diffpeaks.narrowPeak', 'w')
     for i in range(len(pvalues)):
         c, s, e, strand, _ = output[i]
-        p_tmp = -log10(pvalues[i]) if pvalues[i] > 0 else sys.maxint
+        p_tmp = pvalues[i] if pvalues[i] > 0 else sys.maxint
         if filter[i]:
             print(c, s, e, 'Peak' + str(i), 0, strand, 0, p_tmp, 0, -1, sep='\t', file=f)
     f.close()
